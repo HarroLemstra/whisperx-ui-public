@@ -368,9 +368,15 @@ def _pick_launch_port(host: str, start_port: int, span: int = 20) -> int:
     raise OSError(f"No free port found in range {start_port}-{start_port + span}.")
 
 
-if __name__ == "__main__":
-    preferred_port = int(os.getenv("GRADIO_SERVER_PORT", str(config.gradio_port)))
-    launch_port = _pick_launch_port(config.gradio_host, preferred_port, span=20)
+def launch_ui(
+    preferred_port: Optional[int] = None,
+    inbrowser: bool = False,
+    prevent_thread_lock: bool = False,
+) -> int:
+    if preferred_port is None:
+        preferred_port = int(os.getenv("GRADIO_SERVER_PORT", str(config.gradio_port)))
+
+    launch_port = _pick_launch_port(config.gradio_host, int(preferred_port), span=20)
     if launch_port != preferred_port:
         logger.warning(
             "Preferred port %s is busy, using fallback port %s.",
@@ -382,6 +388,13 @@ if __name__ == "__main__":
     app.launch(
         server_name=config.gradio_host,
         server_port=launch_port,
-        inbrowser=False,
+        inbrowser=inbrowser,
         show_error=True,
+        prevent_thread_lock=prevent_thread_lock,
     )
+    return launch_port
+
+
+if __name__ == "__main__":
+    preferred_port = int(os.getenv("GRADIO_SERVER_PORT", str(config.gradio_port)))
+    launch_ui(preferred_port=preferred_port, inbrowser=False, prevent_thread_lock=False)
