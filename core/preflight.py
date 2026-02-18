@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from core.command_resolver import resolve_whisperx_command
 from core.config import AppConfig
 
 
@@ -17,9 +18,13 @@ class PreflightReport:
 
 
 def _check_command(command: list[str], timeout_seconds: int = 15) -> tuple[bool, str]:
-    executable = shutil.which(command[0])
+    executable_path = Path(command[0])
+    if executable_path.is_file():
+        executable = str(executable_path)
+    else:
+        executable = shutil.which(command[0])
     if executable is None:
-        return False, f"{command[0]} not found in PATH"
+        return False, f"{command[0]} not found"
     try:
         completed = subprocess.run(
             command,
@@ -58,7 +63,10 @@ def run_preflight(config: AppConfig, hf_token: Optional[str], diarize: bool = Tr
         }
     )
 
-    whisperx_ok, whisperx_detail = _check_command(["whisperx", "--help"])
+    whisperx_command, whisperx_display = resolve_whisperx_command()
+    whisperx_ok, whisperx_detail = _check_command([*whisperx_command, "--help"])
+    if whisperx_ok:
+        whisperx_detail = whisperx_display
     checks.append(
         {
             "name": "whisperx",

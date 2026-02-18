@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from core.command_resolver import resolve_whisperx_command
 from core.config import AppConfig
 from core.types import JobSpec
 
@@ -27,6 +28,7 @@ class WhisperXRunner:
     def __init__(self, config: AppConfig, logger) -> None:
         self.config = config
         self.logger = logger
+        self.whisperx_command, self.whisperx_display = resolve_whisperx_command()
 
     def execute(
         self,
@@ -126,7 +128,7 @@ class WhisperXRunner:
         align_model: Optional[str],
     ) -> List[str]:
         cmd = [
-            "whisperx",
+            *self.whisperx_command,
             str(wav_path),
             "--model",
             self.config.model_name,
