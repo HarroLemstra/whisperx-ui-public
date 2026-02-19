@@ -220,6 +220,11 @@ def clear_pending_callback():
     return _status_and_dashboard(f"Cleared {count} pending queue item(s).")
 
 
+def kill_all_callback():
+    message = queue_manager.kill_all()
+    return _status_and_dashboard(message)
+
+
 def refresh_callback():
     return _render_dashboard()
 
@@ -273,6 +278,7 @@ def build_ui() -> gr.Blocks:
             start_button = gr.Button("Start queue")
             stop_button = gr.Button("Stop after current")
             clear_button = gr.Button("Clear rest")
+            kill_button = gr.Button("Kill all (force)", variant="stop")
 
         with gr.Row():
             watch_folder = gr.Textbox(label="Watch folder (optional)", value=initial_watch)
@@ -336,6 +342,12 @@ def build_ui() -> gr.Blocks:
 
         clear_button.click(
             fn=clear_pending_callback,
+            inputs=[],
+            outputs=[status_box, queue_table, summary_md, logs_box],
+        )
+
+        kill_button.click(
+            fn=kill_all_callback,
             inputs=[],
             outputs=[status_box, queue_table, summary_md, logs_box],
         )

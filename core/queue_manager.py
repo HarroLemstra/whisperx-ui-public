@@ -43,6 +43,7 @@ class QueueManager:
         self.done: List[JobRecord] = []
         self.failed: List[JobRecord] = []
         self.stop_after_current: bool = False
+        self._kill_switch: bool = False
         self.watch_folder: Optional[str] = None
         self._session_token: Optional[str] = None
         self.runtime_profile: Dict[str, object] = {
@@ -201,6 +202,29 @@ class QueueManager:
         self.logger.info("Stop-after-current requested.")
         return "Stop requested: current file will finish, then queue pauses."
 
+    def kill_all(self) -> str:
+        with self._lock:
+            pending_count = len(self.pending)
+            self.pending.clear()
+            running_job_id = self.running.job_id if self.running else None
+            self.stop_after_current = True
+            self._kill_switch = True
+            self._save_state_locked()
+
+        killed, kill_message = self.runner.cancel_current_run()
+        self._wake_event.set()
+
+        status = f"Kill-all requested. Cleared {pending_count} pending job(s)."
+        if running_job_id:
+            if killed:
+                status += f" Forced stop sent to running job {running_job_id}."
+            else:
+                status += f" Running job {running_job_id} not force-stopped: {kill_message}"
+        else:
+            status += " No running job to stop."
+        self.logger.warning(status)
+        return status
+
     def start_processing(self, ui_token: Optional[str]) -> Tuple[bool, str, PreflightReport]:
         env_map = load_environment(self.config.base_dir)
         token = resolve_hf_token(ui_token, env_map)
@@ -211,6 +235,7 @@ class QueueManager:
         with self._lock:
             self._session_token = ui_token.strip() if ui_token and ui_token.strip() else None
             self.stop_after_current = False
+            self._kill_switch = False
             self._ensure_worker_locked()
             self._save_state_locked()
 
@@ -276,6 +301,11 @@ class QueueManager:
             for attempt in (1, 2):
                 attempts = attempt
                 with self._lock:
+                    kill_requested = self._kill_switch
+                if kill_requested:
+                    error_message = "Job force-stopped by user."
+                    break
+                with self._lock:
                     self.running_attempt = attempt
                     self._save_state_locked()
                 try:
@@ -292,6 +322,12 @@ class QueueManager:
                 except Exception as exc:  # pragma: no cover - subprocess path
                     error_message = str(exc)
                     self.logger.exception("Job %s attempt %s failed.", job.job_id, attempt)
+                    with self._lock:
+                        kill_requested = self._kill_switch
+                    if kill_requested:
+                        error_message = "Job force-stopped by user."
+                        self._append_job_log(job_log_path, "Job force-stopped by user.")
+                        break
                     if attempt == 1:
                         self._append_job_log(job_log_path, "Retrying once after failure...")
 
@@ -365,12 +401,6 @@ class QueueManager:
             (record.fingerprint == fingerprint)
             or (record.fingerprint is None and str(Path(record.source_path)) == path_part)
             for record in self.done
-        ):
-            return True
-        if any(
-            (record.fingerprint == fingerprint)
-            or (record.fingerprint is None and str(Path(record.source_path)) == path_part)
-            for record in self.failed
         ):
             return True
         return False

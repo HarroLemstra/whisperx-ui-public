@@ -66,7 +66,7 @@ def build_output_folder_name(source_path: Path) -> str:
 @dataclass
 class AppConfig:
     base_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[1])
-    model_name: str = "openai/whisper-large-v3-turbo"
+    model_name: str = "large-v3-turbo"
     language: str = "nl"
     device: str = "cpu"
     compute_type: str = "int8"
@@ -88,6 +88,8 @@ class AppConfig:
     output_root: Path = field(init=False)
     temp_dir: Path = field(init=False)
     app_log_path: Path = field(init=False)
+    hf_home_dir: Path = field(init=False)
+    hf_hub_cache_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
         self.logs_dir = self.base_dir / "logs"
@@ -96,9 +98,13 @@ class AppConfig:
         self.output_root = self.base_dir / "out"
         self.temp_dir = self.base_dir / "tmp"
         self.app_log_path = self.logs_dir / "app.log"
+        self.hf_home_dir = self.data_dir / "hf_home"
+        self.hf_hub_cache_dir = self.hf_home_dir / "hub"
 
     def ensure_directories(self) -> None:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.hf_home_dir.mkdir(parents=True, exist_ok=True)
+        self.hf_hub_cache_dir.mkdir(parents=True, exist_ok=True)

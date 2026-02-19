@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +32,15 @@ class WhisperXRunner:
         self.config = config
         self.logger = logger
         self.whisperx_command, self.whisperx_display = resolve_whisperx_command()
+        self._process_lock = threading.RLock()
+        self._current_process: Optional[subprocess.Popen[str]] = None
+        self.model_name = self._resolve_model_name(self.config.model_name)
+        if self.model_name != self.config.model_name:
+            self.logger.warning(
+                "Model '%s' mapped to WhisperX/faster-whisper compatible model '%s'.",
+                self.config.model_name,
+                self.model_name,
+            )
 
     def execute(
         self,
@@ -44,6 +56,7 @@ class WhisperXRunner:
         if not hf_token.strip():
             raise RuntimeError("HF token is empty; diarization requires a token.")
 
+        self.config.ensure_directories()
         output_dir.mkdir(parents=True, exist_ok=True)
         temp_dir = self.config.temp_dir / f"{job.job_id}_attempt{attempt}"
         temp_dir.mkdir(parents=True, exist_ok=True)
@@ -100,6 +113,20 @@ class WhisperXRunner:
         if first_result.returncode == 0:
             return
 
+        if self._looks_like_missing_model_bin(first_result.combined):
+            cache_dir = self._extract_model_cache_path(first_result.combined)
+            if cache_dir is not None and cache_dir.exists():
+                self._append_job_log(
+                    job_log_path,
+                    f"Detected corrupted/incomplete model cache at {cache_dir}; clearing and retrying once.",
+                )
+                self.logger.warning("Removing broken Whisper cache directory: %s", cache_dir)
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                retry_result = self._run_command(base_cmd, job_log_path, sensitive_values=[hf_token])
+                if retry_result.returncode == 0:
+                    return
+                first_result = retry_result
+
         if self._looks_like_alignment_failure(first_result.combined):
             self._append_job_log(
                 job_log_path,
@@ -131,7 +158,7 @@ class WhisperXRunner:
             *self.whisperx_command,
             str(wav_path),
             "--model",
-            self.config.model_name,
+            self.model_name,
             "--language",
             job.language,
             "--device",
@@ -173,13 +200,28 @@ class WhisperXRunner:
         masked = self._mask_command(command, sensitive_values or [])
         self.logger.info("Running: %s", masked)
         self._append_job_log(job_log_path, f"$ {masked}")
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
+        env = self._build_subprocess_env()
+        with self._process_lock:
+            proc = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+            )
+            self._current_process = proc
+        try:
+            stdout, stderr = proc.communicate()
+        finally:
+            with self._process_lock:
+                self._current_process = None
+        completed = subprocess.CompletedProcess(
+            args=command,
+            returncode=proc.returncode,
+            stdout=stdout,
+            stderr=stderr,
         )
         if completed.stdout:
             self._append_job_log(job_log_path, completed.stdout.rstrip())
@@ -191,6 +233,84 @@ class WhisperXRunner:
             stdout=completed.stdout or "",
             stderr=completed.stderr or "",
         )
+
+    def cancel_current_run(self) -> Tuple[bool, str]:
+        with self._process_lock:
+            proc = self._current_process
+            pid = proc.pid if proc else None
+        if not proc or pid is None:
+            return False, "No active ffmpeg/whisperx process to kill."
+        try:
+            if self._is_windows():
+                killer = subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                )
+                if killer.returncode != 0:
+                    self.logger.warning(
+                        "taskkill failed for PID %s (%s); trying terminate/kill fallback.",
+                        pid,
+                        (killer.stderr or killer.stdout or "").strip(),
+                    )
+                    proc.terminate()
+                    proc.kill()
+            else:
+                proc.terminate()
+                proc.kill()
+            return True, f"Killed active process PID {pid}."
+        except Exception as exc:  # pragma: no cover - defensive
+            self.logger.exception("Failed to kill active process PID %s.", pid)
+            return False, f"Failed to kill active process PID {pid}: {exc}"
+
+    def _looks_like_missing_model_bin(self, combined_output: str) -> bool:
+        text = combined_output.lower()
+        return "unable to open file 'model.bin'" in text
+
+    def _extract_model_cache_path(self, combined_output: str) -> Optional[Path]:
+        match = re.search(r"model '([^']+)'", combined_output)
+        if not match:
+            return None
+        candidate = Path(match.group(1)).expanduser()
+        return candidate
+
+    def _is_windows(self) -> bool:
+        return os.name == "nt"
+
+    def _build_subprocess_env(self) -> Dict[str, str]:
+        env = dict(os.environ)
+        env["HF_HOME"] = str(self.config.hf_home_dir)
+        env["HF_HUB_CACHE"] = str(self.config.hf_hub_cache_dir)
+        env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+        env["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+        base_dir = str(self.config.base_dir)
+        existing_pythonpath = env.get("PYTHONPATH", "").strip()
+        if existing_pythonpath:
+            if base_dir not in existing_pythonpath.split(os.pathsep):
+                env["PYTHONPATH"] = f"{base_dir}{os.pathsep}{existing_pythonpath}"
+        else:
+            env["PYTHONPATH"] = base_dir
+        return env
+
+    def _resolve_model_name(self, configured_model: str) -> str:
+        cleaned = configured_model.strip()
+        lowered = cleaned.lower()
+        aliases = {
+            "openai/whisper-large-v3-turbo": "large-v3-turbo",
+            "openai/whisper-large-v3": "large-v3",
+            "openai/whisper-large-v2": "large-v2",
+            "openai/whisper-large-v1": "large-v1",
+            "openai/whisper-large": "large",
+            "openai/whisper-medium": "medium",
+            "openai/whisper-small": "small",
+            "openai/whisper-base": "base",
+            "openai/whisper-tiny": "tiny",
+        }
+        return aliases.get(lowered, cleaned)
+
 
     def _postprocess_outputs(self, output_dir: Path) -> Dict[str, str]:
         json_path = self._latest_file(output_dir, ".json")
