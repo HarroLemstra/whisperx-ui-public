@@ -66,17 +66,17 @@ def build_output_folder_name(source_path: Path) -> str:
 @dataclass
 class AppConfig:
     base_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[1])
-    model_name: str = "large-v3-turbo"
+    model_name: str = "large-v3"
     language: str = "nl"
     device: str = "cpu"
-    compute_type: str = "int8"
-    vad_method: str = "silero"
+    compute_type: str = "float32"
+    vad_method: str = "pyannote"
     segment_resolution: str = "sentence"
     diarize_model_default: str = "pyannote/speaker-diarization-3.1"
     align_fallback_model: str = "jonatasgrosman/wav2vec2-large-xlsr-53-dutch"
     default_min_speakers: int = 2
     default_max_speakers: int = 4
-    default_chunk_size: int = 30
+    default_chunk_size: int = 15
     default_threads: int = field(default_factory=_default_threads)
     watch_interval_seconds: int = 30
     gradio_host: str = "127.0.0.1"

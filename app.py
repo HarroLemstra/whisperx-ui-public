@@ -206,7 +206,10 @@ def rescan_watch_callback(
 def start_queue_callback(ui_token: str):
     ok, message, report = queue_manager.start_processing(ui_token)
     details = _format_preflight(report.checks)
-    combined = f"{message}\n\n{details}"
+    if ok:
+        combined = f"{message}\n\n{details}"
+    else:
+        combined = f"Queue NOT started.\n{message}\n\n{details}"
     return _status_and_dashboard(combined)
 
 

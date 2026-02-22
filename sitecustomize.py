@@ -65,3 +65,11 @@ def _patch_huggingface_hub_for_windows() -> None:
 
 _patch_huggingface_hub_for_windows()
 
+
+def _patch_torch_serialization_defaults() -> None:
+    # PyTorch 2.6 changed torch.load default to weights_only=True. pyannote checkpoints
+    # still expect full pickle loading in trusted local workflows like this app.
+    os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+
+
+_patch_torch_serialization_defaults()

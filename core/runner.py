@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -34,6 +35,8 @@ class WhisperXRunner:
         self.whisperx_command, self.whisperx_display = resolve_whisperx_command()
         self._process_lock = threading.RLock()
         self._current_process: Optional[subprocess.Popen[str]] = None
+        self._diarization_ready_lock = threading.RLock()
+        self._diarization_ready_models: set[str] = set()
         self.model_name = self._resolve_model_name(self.config.model_name)
         if self.model_name != self.config.model_name:
             self.logger.warning(
@@ -64,6 +67,11 @@ class WhisperXRunner:
 
         try:
             self._append_job_log(job_log_path, f"Attempt {attempt} started at {self._now_iso()}")
+            self._ensure_diarization_pipeline_ready(
+                diarize_model=job.diarize_model,
+                hf_token=hf_token,
+                job_log_path=job_log_path,
+            )
             self._convert_to_wav(source_path, normalized_wav, job_log_path)
             self._run_whisperx_with_align_fallback(
                 wav_path=normalized_wav,
@@ -191,16 +199,53 @@ class WhisperXRunner:
             cmd.extend(["--align_model", align_model])
         return cmd
 
+    def _ensure_diarization_pipeline_ready(self, diarize_model: str, hf_token: str, job_log_path: Path) -> None:
+        model_name = (diarize_model or self.config.diarize_model_default).strip()
+        with self._diarization_ready_lock:
+            if model_name in self._diarization_ready_models:
+                return
+
+        self._append_job_log(job_log_path, f"Preparing diarization cache for {model_name}...")
+        warmup_cmd = [
+            sys.executable,
+            "-m",
+            "core.diarization_warmup",
+            "--model",
+            model_name,
+            "--hf_token",
+            hf_token,
+            "--device",
+            self.config.device,
+        ]
+        result = self._run_command(warmup_cmd, job_log_path, sensitive_values=[hf_token])
+        if result.returncode != 0:
+            if self._looks_like_hf_local_entry_not_found(result.combined):
+                raise RuntimeError(
+                    "Diarization warmup failed: Hugging Face model files could not be downloaded from cache/hub. "
+                    "Check internet connection and HF model access, then retry."
+                )
+            if self._looks_like_torch_weights_only_error(result.combined):
+                raise RuntimeError(
+                    "Diarization warmup failed due to PyTorch checkpoint compatibility "
+                    "(weights_only). Set TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 and retry."
+                )
+            raise RuntimeError(self._format_command_error("diarization warmup failed", result))
+
+        with self._diarization_ready_lock:
+            self._diarization_ready_models.add(model_name)
+        self._append_job_log(job_log_path, f"Diarization cache ready for {model_name}.")
+
     def _run_command(
         self,
         command: List[str],
         job_log_path: Path,
         sensitive_values: Optional[Iterable[str]] = None,
+        custom_env: Optional[Dict[str, str]] = None,
     ) -> CommandResult:
         masked = self._mask_command(command, sensitive_values or [])
         self.logger.info("Running: %s", masked)
         self._append_job_log(job_log_path, f"$ {masked}")
-        env = self._build_subprocess_env()
+        env = custom_env if custom_env is not None else self._build_subprocess_env()
         with self._process_lock:
             proc = subprocess.Popen(
                 command,
@@ -270,6 +315,17 @@ class WhisperXRunner:
         text = combined_output.lower()
         return "unable to open file 'model.bin'" in text
 
+    def _looks_like_hf_local_entry_not_found(self, combined_output: str) -> bool:
+        text = combined_output.lower()
+        return (
+            "localentrynotfounderror" in text
+            or "we cannot find the requested files in the local cache" in text
+        )
+
+    def _looks_like_torch_weights_only_error(self, combined_output: str) -> bool:
+        text = combined_output.lower()
+        return "weights only load failed" in text or "_pickle.unpicklingerror" in text
+
     def _extract_model_cache_path(self, combined_output: str) -> Optional[Path]:
         match = re.search(r"model '([^']+)'", combined_output)
         if not match:
@@ -286,6 +342,7 @@ class WhisperXRunner:
         env["HF_HUB_CACHE"] = str(self.config.hf_hub_cache_dir)
         env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
         env["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+        env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
         base_dir = str(self.config.base_dir)
         existing_pythonpath = env.get("PYTHONPATH", "").strip()
         if existing_pythonpath:

@@ -230,6 +230,8 @@ class QueueManager:
         token = resolve_hf_token(ui_token, env_map)
         report = run_preflight(self.config, token, diarize=True)
         if not report.ok:
+            failed_checks = [f"{c['name']}: {c['detail']}" for c in report.checks if c.get("ok") != "true"]
+            self.logger.warning("Preflight failed. %s", " | ".join(failed_checks))
             return False, "Preflight failed. Fix checks before starting queue.", report
 
         with self._lock:
